@@ -1,0 +1,233 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "DHT.h"
+
+// ====== LCD CONFIGURATION ======
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Use 0x3F if 0x27 doesn't work
+
+// ====== DHT SENSOR CONFIGURATION ======
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ====== MOTOR CONTROL (Temperature) ======
+#define MOTOR_PIN 8
+#define TEMP_THRESHOLD 31 // °C threshold
+
+// ====== ULTRASONIC SENSOR (Tank) ======
+#define TRIG_PIN 3
+#define ECHO_PIN 4
+#define TANK_HEIGHT_CM 10 // Tank height in cm
+
+// ====== IR OBSTACLE SENSOR (Tap) ======
+#define IR_SENSOR_PIN 5
+
+// ====== WATER PUMP CONTROL ======
+#define PUMP_PIN 7
+
+// ====== MQ2 SMOKE SENSOR ======
+#define MQ2_PIN A0
+#define SMOKE_THRESHOLD 200
+
+// ====== BUZZER & RESET BUTTON ======
+#define BUZZER_PIN 11
+#define RESET_BUTTON_PIN 9
+bool buzzerActive = false;
+bool buzzerMuted = false;   // NEW mute flag
+
+// ====== PAGE CONTROL ======
+unsigned long lastPageSwitch = 0;
+const unsigned long pageInterval = 3000; // 3 seconds per page
+int currentPage = 0;
+
+// ====== SERIAL COMMAND ======
+String command = "";
+
+// ====== LDR SENSOR CONFIGURATION ======
+#define LDR_PIN A1         // Analog pin for LDR
+#define LDR_THRESHOLD 500  // New threshold (adjust based on testing)
+#define R_FIXED 10000      // Fixed resistor value in ohms (10kΩ)
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(MOTOR_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(IR_SENSOR_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  digitalWrite(MOTOR_PIN, LOW);
+  digitalWrite(PUMP_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("System Starting");
+  delay(2000);
+  lcd.clear();
+
+  dht.begin();
+  
+  // Print initial LDR value for calibration
+  Serial.print("Initial LDR value: ");
+  Serial.println(analogRead(LDR_PIN));
+}
+
+float readTankDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000UL);
+  return duration * 0.0343 / 2;
+}
+
+int readLDRValue() {
+  return analogRead(LDR_PIN); // Read raw analog value (0-1023)
+}
+
+void loop() {
+  // ====== CHECK LIGHT CONDITION WITH THRESHOLD ======
+  int ldrValue = readLDRValue();
+  bool isDark = (ldrValue < LDR_THRESHOLD);  // Lower value means darker
+
+  if (!isDark) {
+    // Light detected: Shut down the system completely
+    digitalWrite(MOTOR_PIN, LOW);
+    digitalWrite(PUMP_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerActive = false;
+    buzzerMuted = true;
+    command = "";  // Clear any pending command
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Light Detected");
+    lcd.setCursor(0, 1);
+    lcd.print("System OFF");
+    lcd.print(" LDR:");
+    lcd.print(ldrValue);
+
+    lastPageSwitch = millis();  // Reset page timer
+    currentPage = 0;
+
+    delay(500);  // Slower refresh when off
+    return;
+  }
+
+  // ====== SYSTEM ON (dark detected): Activate all sensors and operations ======
+
+  // ====== SERIAL INPUT ======
+  if (Serial.available() > 0) {
+    command = Serial.readStringUntil('\n');  // read until newline
+    command.trim();                          // remove extra spaces
+    Serial.print("Command received: ");
+    Serial.println(command);
+  }
+
+  // ====== RESET BUTTON ======
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    buzzerActive = false;
+    buzzerMuted = true;               // mute when reset pressed
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // ====== SENSOR READINGS ======
+  float temp = dht.readTemperature();
+  float distanceCm = readTankDistanceCM();
+  float waterLevelCm = TANK_HEIGHT_CM - distanceCm;
+  waterLevelCm = constrain(waterLevelCm, 0, TANK_HEIGHT_CM);
+
+  int objectDetected = digitalRead(IR_SENSOR_PIN); // LOW = object detected
+  int airQuality = analogRead(MQ2_PIN);
+  bool smokeDetected = airQuality > SMOKE_THRESHOLD;
+
+  // ====== BUZZER CONTROL ======
+  if (smokeDetected && !buzzerActive && !buzzerMuted) {
+    buzzerActive = true;
+    digitalWrite(BUZZER_PIN, HIGH);
+  }
+
+  if (command.equalsIgnoreCase("off")) {
+    buzzerActive = false;
+    buzzerMuted = true;               // mute when serial OFF
+    digitalWrite(BUZZER_PIN, LOW);
+    Serial.println("Buzzer OFF (muted until air clears)");
+    command = "";
+  }
+
+  // ====== RESET MUTE WHEN AIR CLEARS ======
+  if (!smokeDetected) {
+    buzzerMuted = false;
+  }
+
+  // ====== MOTOR & PUMP CONTROL ======
+  digitalWrite(MOTOR_PIN, (!isnan(temp) && temp > TEMP_THRESHOLD) ? HIGH : LOW);
+  digitalWrite(PUMP_PIN, (objectDetected == LOW && waterLevelCm > 0) ? HIGH : LOW);
+
+  // ====== PAGE SWITCHING ======
+  if (millis() - lastPageSwitch > pageInterval) {
+    currentPage = (currentPage + 1) % 4;  // 4 pages to include LDR status
+    lastPageSwitch = millis();
+    lcd.clear();
+  }
+
+  // ====== LCD DISPLAY ======
+  switch (currentPage) {
+    case 0: // Page 1: Temperature + Water Level
+      lcd.setCursor(0, 0);
+      lcd.print("Temp: ");
+      if (!isnan(temp)) {
+        lcd.print(temp, 1);
+        lcd.print((char)223);
+        lcd.print("C");
+      } else {
+        lcd.print("N/A");
+      }
+
+      lcd.setCursor(0, 1);
+      lcd.print("Water: ");
+      lcd.print(waterLevelCm, 1);
+      lcd.print("cm");
+      break;
+
+    case 1: // Page 2: Tap + Pump Status
+      lcd.setCursor(0, 0);
+      lcd.print("Tap: ");
+      lcd.print(objectDetected == LOW ? "Yes" : "No");
+
+      lcd.setCursor(0, 1);
+      lcd.print("Pump: ");
+      lcd.print(digitalRead(PUMP_PIN) ? "ON" : "OFF");
+      break;
+
+    case 2: // Page 3: Air Quality
+      lcd.setCursor(0, 0);
+      lcd.print("Air Quality:");
+
+      lcd.setCursor(0, 1);
+      lcd.print("AQ: ");
+      lcd.print(airQuality);
+      lcd.print(smokeDetected ? " Smoke!" : " Safe");
+      break;
+
+    case 3: // Page 4: LDR Status + Value
+      lcd.setCursor(0, 0);
+      lcd.print("LDR Status: ");
+      lcd.print(isDark ? "Dark" : "Light");
+
+      lcd.setCursor(0, 1);
+      lcd.print("Value: ");
+      lcd.print(ldrValue);
+      lcd.print(" Th:");
+      lcd.print(LDR_THRESHOLD);
+      break;
+  }
+
+  delay(100);
+}
