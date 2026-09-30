@@ -14,7 +14,6 @@ A sensor-based home automation system built on an Arduino Uno. It monitors light
 - [Cost Breakdown](#cost-breakdown)
 - [Limitations](#limitations)
 - [Future Scope](#future-scope)
-- [Team](#team)
 
 ---
 
