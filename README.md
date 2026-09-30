@@ -112,7 +112,7 @@ The sketch prints the initial LDR value over serial at startup to help with cali
 
 ### Setup
 
-1. Wire the circuit as shown in the [wiring diagram](Home-Automation-System/fritzingsensorproject_bb.png).
+1. Wire the circuit as shown in the [wiring diagram](fritzingsensorproject_bb.png).
 2. Clone this repository:
    ```bash
    git clone https://github.com/<your-username>/<your-repo>.git
